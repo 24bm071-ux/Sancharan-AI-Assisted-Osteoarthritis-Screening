@@ -2,30 +2,40 @@
 #include <math.h>
 
 // ============================================================
-// HLK-LD2402 + ESP32-C3 SUPER MINI
-// GAIT RADAR - FAST FILTERED VERSION
+// HLK-LD2420 + ESP32-C3 SUPER MINI
+// HUMAN MOTION / GAIT RADAR
 //
-// RAW DISTANCE
-//      ↓
-// RANGE CHECK
-//      ↓
-// OUTLIER REJECTION
-//      ↓
-// 3-SAMPLE MEDIAN
-//      ↓
-// LOW-PASS FILTER
-//      ↓
-// VELOCITY
-//      ↓
-// VELOCITY FILTER
-//      ↓
-// APPROACHING / LOW_RADIAL_MOTION / RECEDING
+// LD2420 UART format:
+//
+// ON
+// Range 105
+// Range 103
+// Range 101
+// ...
+// OFF
+//
+// CSV OUTPUT:
+//
+// time_ms,
+// raw_cm,
+// median_cm,
+// filtered_cm,
+// sample_interval_ms,
+// raw_velocity_mps,
+// filtered_velocity_mps,
+// direction,
+// presence
 // ============================================================
 
 
 // ============================================================
 // PIN CONFIGURATION
 // ============================================================
+
+// HLK-LD2420:
+// OT1 -> UART TX from radar
+// RX  -> UART RX to radar
+// OT2 -> Presence output
 
 #define RADAR_RX  4
 #define RADAR_TX  5
@@ -46,8 +56,8 @@ const float MAX_DISTANCE_CM = 600.0;
 // OUTLIER REJECTION
 // ============================================================
 
-// Maximum acceptable change between consecutive
-// valid radar measurements.
+// Maximum acceptable distance jump
+// between two consecutive measurements.
 
 const float MAX_JUMP_CM = 70.0;
 
@@ -55,8 +65,6 @@ const float MAX_JUMP_CM = 70.0;
 // ============================================================
 // MEDIAN FILTER
 // ============================================================
-
-// Reduced from 5 → 3 to reduce delay.
 
 #define MEDIAN_SIZE 3
 
@@ -70,20 +78,14 @@ int medianCount = 0;
 // DISTANCE LOW-PASS FILTER
 // ============================================================
 
-// Higher alpha = faster response.
-//
-// Previous: 0.30
-// Current : 0.60
+// Higher alpha = faster response
 
 const float DISTANCE_ALPHA = 0.60;
 
 
 // ============================================================
-// VELOCITY FILTER
+// VELOCITY LOW-PASS FILTER
 // ============================================================
-
-// Previous: 0.25
-// Current : 0.40
 
 const float SPEED_ALPHA = 0.40;
 
@@ -99,8 +101,7 @@ const float MAX_SPEED_MPS = 3.0;
 // RADIAL MOTION THRESHOLD
 // ============================================================
 
-// Below ±0.05 m/s is considered
-// LOW_RADIAL_MOTION.
+// Below ±0.05 m/s = LOW_RADIAL_MOTION
 
 const float RADIAL_MOTION_THRESHOLD = 0.05;
 
@@ -120,18 +121,18 @@ float filteredDistance = NAN;
 float previousFilteredDistance = NAN;
 
 
-// ------------------------------------------------------------
-// Velocity
-// ------------------------------------------------------------
+// ============================================================
+// VELOCITY VARIABLES
+// ============================================================
 
 float rawVelocity = 0.0;
 
 float filteredVelocity = 0.0;
 
 
-// ------------------------------------------------------------
-// Statistics
-// ------------------------------------------------------------
+// ============================================================
+// STATISTICS
+// ============================================================
 
 float minimumDistance = 99999.0;
 
@@ -169,10 +170,35 @@ String radarLine = "";
 
 
 // ============================================================
+// FUNCTION DECLARATIONS
+// ============================================================
+
+void processRadarLine(String line);
+
+void processDistance(float distance);
+
+void startNewDetection(float distance);
+
+void addToMedianBuffer(float value);
+
+float calculateMedian();
+
+String getDirection();
+
+void printMeasurement();
+
+void printDetectionSummary();
+
+
+// ============================================================
 // SETUP
 // ============================================================
 
-void setup() {
+void setup()
+{
+  // ----------------------------------------------------------
+  // USB SERIAL
+  // ----------------------------------------------------------
 
   Serial.begin(115200);
 
@@ -180,7 +206,7 @@ void setup() {
 
 
   // ----------------------------------------------------------
-  // LD2402 UART
+  // HLK-LD2420 UART
   // ----------------------------------------------------------
 
   RadarSerial.begin(
@@ -192,14 +218,17 @@ void setup() {
 
 
   // ----------------------------------------------------------
-  // LD2402 IO
+  // OT2 PRESENCE OUTPUT
   // ----------------------------------------------------------
 
-  pinMode(RADAR_IO, INPUT);
+  pinMode(
+    RADAR_IO,
+    INPUT
+  );
 
 
   // ----------------------------------------------------------
-  // Startup information
+  // STARTUP MESSAGE
   // ----------------------------------------------------------
 
   Serial.println();
@@ -209,11 +238,11 @@ void setup() {
   );
 
   Serial.println(
-    "        HLK-LD2402 GAIT RADAR LOGGER"
+    "              HLK-LD2420 RADAR LOGGER"
   );
 
   Serial.println(
-    "        ESP32-C3 SUPER MINI"
+    "              ESP32-C3 SUPER MINI"
   );
 
   Serial.println(
@@ -221,6 +250,11 @@ void setup() {
   );
 
   Serial.println();
+
+
+  // ----------------------------------------------------------
+  // UART INFORMATION
+  // ----------------------------------------------------------
 
   Serial.println(
     "UART configuration:"
@@ -236,23 +270,33 @@ void setup() {
 
   Serial.println();
 
+
+  // ----------------------------------------------------------
+  // PIN INFORMATION
+  // ----------------------------------------------------------
+
   Serial.println(
     "Pin configuration:"
   );
 
   Serial.println(
-    "LD2402 TX -> GPIO4"
+    "LD2420 OT1 (TX) -> ESP32 GPIO4"
   );
 
   Serial.println(
-    "LD2402 RX -> GPIO5"
+    "LD2420 RX       -> ESP32 GPIO5"
   );
 
   Serial.println(
-    "LD2402 IO -> GPIO6"
+    "LD2420 OT2      -> ESP32 GPIO6"
   );
 
   Serial.println();
+
+
+  // ----------------------------------------------------------
+  // FILTER INFORMATION
+  // ----------------------------------------------------------
 
   Serial.print(
     "Valid distance: "
@@ -274,6 +318,7 @@ void setup() {
     " cm"
   );
 
+
   Serial.print(
     "Median samples: "
   );
@@ -281,6 +326,7 @@ void setup() {
   Serial.println(
     MEDIAN_SIZE
   );
+
 
   Serial.print(
     "Distance alpha: "
@@ -290,6 +336,7 @@ void setup() {
     DISTANCE_ALPHA
   );
 
+
   Serial.print(
     "Speed alpha: "
   );
@@ -298,7 +345,9 @@ void setup() {
     SPEED_ALPHA
   );
 
+
   Serial.println();
+
 
   Serial.println(
     "============================================================"
@@ -307,9 +356,9 @@ void setup() {
   Serial.println();
 
 
-  // ----------------------------------------------------------
+  // ==========================================================
   // CSV HEADER
-  // ----------------------------------------------------------
+  // ==========================================================
 
   Serial.println(
     "time_ms,"
@@ -329,31 +378,34 @@ void setup() {
 // MAIN LOOP
 // ============================================================
 
-void loop() {
-
+void loop()
+{
 
   // ==========================================================
-  // READ UART
+  // READ LD2420 UART
   // ==========================================================
 
-  while (RadarSerial.available()) {
+  while (RadarSerial.available())
+  {
 
     char c =
       RadarSerial.read();
 
 
     // --------------------------------------------------------
-    // End of line
+    // END OF LINE
     // --------------------------------------------------------
 
     if (
       c == '\n' ||
       c == '\r'
-    ) {
+    )
+    {
 
       if (
         radarLine.length() > 0
-      ) {
+      )
+      {
 
         processRadarLine(
           radarLine
@@ -361,16 +413,19 @@ void loop() {
 
         radarLine = "";
       }
+    }
 
-    } else {
+    else
+    {
 
       // ------------------------------------------------------
-      // Protect against oversized line
+      // PROTECT UART BUFFER
       // ------------------------------------------------------
 
       if (
         radarLine.length() < 80
-      ) {
+      )
+      {
 
         radarLine += c;
       }
@@ -382,7 +437,8 @@ void loop() {
   // UPDATE DETECTION DURATION
   // ==========================================================
 
-  if (radarPresent) {
+  if (radarPresent)
+  {
 
     detectionDuration =
       millis() -
@@ -392,29 +448,72 @@ void loop() {
 
 
 // ============================================================
-// PROCESS RADAR LINE
+// PROCESS RADAR UART LINE
 // ============================================================
 
 void processRadarLine(
   String line
-) {
+)
+{
 
   line.trim();
 
 
+  // Ignore empty lines
+
+  if (
+    line.length() == 0
+  )
+  {
+    return;
+  }
+
+
   // ==========================================================
-  // TARGET LOST
+  // PERSON DETECTED
+  // ==========================================================
+
+  if (
+    line.equalsIgnoreCase(
+      "ON"
+    )
+  )
+  {
+
+    radarPresent = true;
+
+    // IMPORTANT:
+    //
+    // Do NOT initialize filteredDistance here.
+    //
+    // LD2420 sends ON before Range.
+    //
+    // We wait for:
+    //
+    // Range xxx
+
+    return;
+  }
+
+
+  // ==========================================================
+  // PERSON LOST
   // ==========================================================
 
   if (
     line.equalsIgnoreCase(
       "OFF"
     )
-  ) {
+  )
+  {
 
-    if (radarPresent) {
+    if (
+      radarPresent
+    )
+    {
 
       radarPresent = false;
+
 
       detectionDuration =
         millis() -
@@ -429,19 +528,31 @@ void processRadarLine(
 
 
   // ==========================================================
-  // DISTANCE MESSAGE
+  // RANGE MESSAGE
+  //
+  // Example:
+  //
+  // Range 105
+  // Range 97
+  // Range 120
   // ==========================================================
 
   if (
     line.startsWith(
-      "distance:"
+      "Range "
     )
-  ) {
+    ||
+    line.startsWith(
+      "range "
+    )
+  )
+  {
 
     String value =
       line.substring(
-        9
+        6
       );
+
 
     value.trim();
 
@@ -450,9 +561,15 @@ void processRadarLine(
       value.toFloat();
 
 
-    processDistance(
-      distance
-    );
+    if (
+      distance > 0
+    )
+    {
+
+      processDistance(
+        distance
+      );
+    }
 
     return;
   }
@@ -465,48 +582,55 @@ void processRadarLine(
 
 void processDistance(
   float distance
-) {
+)
+{
+
+  // ==========================================================
+  // SAVE RAW DISTANCE
+  // ==========================================================
 
   rawDistance =
     distance;
 
 
   // ==========================================================
-  // 1. RANGE VALIDATION
+  // RANGE VALIDATION
   // ==========================================================
 
   if (
-    distance <
-    MIN_DISTANCE_CM
-    ||
-    distance >
-    MAX_DISTANCE_CM
-  ) {
-
-    Serial.print(
-      "# RANGE REJECTED: "
-    );
-
-    Serial.print(
-      distance,
-      1
-    );
-
-    Serial.println(
-      " cm"
-    );
+    distance < MIN_DISTANCE_CM ||
+    distance > MAX_DISTANCE_CM
+  )
+  {
 
     return;
   }
 
 
   // ==========================================================
-  // NEW DETECTION
+  // FIRST VALID DISTANCE
   // ==========================================================
 
+  // IMPORTANT FIX:
+  //
+  // LD2420 sequence is:
+  //
+  // ON
+  // Range 41
+  //
+  // radarPresent is already TRUE because of ON.
+  //
+  // Therefore we also check:
+  //
+  // isnan(filteredDistance)
+  //
+  // This prevents filteredDistance from becoming NAN.
+
   if (
-    !radarPresent
-  ) {
+    !radarPresent ||
+    isnan(filteredDistance)
+  )
+  {
 
     startNewDetection(
       distance
@@ -517,7 +641,7 @@ void processDistance(
 
 
   // ==========================================================
-  // 2. OUTLIER REJECTION
+  // OUTLIER REJECTION
   // ==========================================================
 
   float difference =
@@ -530,36 +654,15 @@ void processDistance(
   if (
     difference >
     MAX_JUMP_CM
-  ) {
-
-    Serial.print(
-      "# OUTLIER REJECTED: "
-    );
-
-    Serial.print(
-      distance,
-      1
-    );
-
-    Serial.print(
-      " cm | jump = "
-    );
-
-    Serial.print(
-      difference,
-      1
-    );
-
-    Serial.println(
-      " cm"
-    );
+  )
+  {
 
     return;
   }
 
 
   // ==========================================================
-  // 3. MEDIAN FILTER
+  // MEDIAN FILTER
   // ==========================================================
 
   addToMedianBuffer(
@@ -572,7 +675,7 @@ void processDistance(
 
 
   // ==========================================================
-  // 4. LOW-PASS FILTER
+  // LOW-PASS DISTANCE FILTER
   // ==========================================================
 
   filteredDistance =
@@ -590,13 +693,14 @@ void processDistance(
 
 
   // ==========================================================
-  // UPDATE DISTANCE STATISTICS
+  // DISTANCE STATISTICS
   // ==========================================================
 
   if (
     filteredDistance <
     minimumDistance
-  ) {
+  )
+  {
 
     minimumDistance =
       filteredDistance;
@@ -606,7 +710,8 @@ void processDistance(
   if (
     filteredDistance >
     maximumDistance
-  ) {
+  )
+  {
 
     maximumDistance =
       filteredDistance;
@@ -614,7 +719,7 @@ void processDistance(
 
 
   // ==========================================================
-  // 5. VELOCITY
+  // CURRENT TIME
   // ==========================================================
 
   unsigned long currentTime =
@@ -626,33 +731,51 @@ void processDistance(
     previousTime;
 
 
+  // ==========================================================
+  // VELOCITY
+  // ==========================================================
+
   if (
-    sampleInterval > 0
-  ) {
+    sampleInterval > 0 &&
+    !isnan(previousFilteredDistance)
+  )
+  {
 
     float dt =
       sampleInterval /
       1000.0;
 
 
+    // --------------------------------------------------------
+    // Distance change
+    // --------------------------------------------------------
+
     float distanceChange =
       filteredDistance -
       previousFilteredDistance;
 
+
+    // --------------------------------------------------------
+    // Convert cm → m
+    // --------------------------------------------------------
 
     float distanceChangeMeters =
       distanceChange /
       100.0;
 
 
+    // --------------------------------------------------------
+    // Velocity
+    // --------------------------------------------------------
+
     rawVelocity =
       distanceChangeMeters /
       dt;
 
 
-    // --------------------------------------------------------
-    // Reject unrealistic velocity
-    // --------------------------------------------------------
+    // ========================================================
+    // VELOCITY LIMIT
+    // ========================================================
 
     if (
       fabs(
@@ -660,7 +783,8 @@ void processDistance(
       )
       >
       MAX_SPEED_MPS
-    ) {
+    )
+    {
 
       rawVelocity =
         0.0;
@@ -668,7 +792,7 @@ void processDistance(
 
 
     // ========================================================
-    // 6. VELOCITY LOW-PASS FILTER
+    // VELOCITY LOW-PASS FILTER
     // ========================================================
 
     filteredVelocity =
@@ -685,13 +809,14 @@ void processDistance(
       );
 
 
-    // --------------------------------------------------------
-    // Peak approaching speed
-    // --------------------------------------------------------
+    // ========================================================
+    // PEAK APPROACHING SPEED
+    // ========================================================
 
     if (
       filteredVelocity < 0
-    ) {
+    )
+    {
 
       float speed =
         fabs(
@@ -702,7 +827,8 @@ void processDistance(
       if (
         speed >
         peakApproachSpeed
-      ) {
+      )
+      {
 
         peakApproachSpeed =
           speed;
@@ -710,18 +836,20 @@ void processDistance(
     }
 
 
-    // --------------------------------------------------------
-    // Peak receding speed
-    // --------------------------------------------------------
+    // ========================================================
+    // PEAK RECEDING SPEED
+    // ========================================================
 
     if (
       filteredVelocity > 0
-    ) {
+    )
+    {
 
       if (
         filteredVelocity >
         peakRecedeSpeed
-      ) {
+      )
+      {
 
         peakRecedeSpeed =
           filteredVelocity;
@@ -729,9 +857,9 @@ void processDistance(
     }
 
 
-    // --------------------------------------------------------
-    // Average velocity calculation
-    // --------------------------------------------------------
+    // ========================================================
+    // TOTAL ABSOLUTE VELOCITY
+    // ========================================================
 
     totalAbsoluteVelocity +=
       fabs(
@@ -747,6 +875,7 @@ void processDistance(
   previousFilteredDistance =
     filteredDistance;
 
+
   previousTime =
     currentTime;
 
@@ -755,7 +884,7 @@ void processDistance(
 
 
   // ==========================================================
-  // PRINT
+  // PRINT RESULT
   // ==========================================================
 
   printMeasurement();
@@ -768,14 +897,27 @@ void processDistance(
 
 void startNewDetection(
   float distance
-) {
+)
+{
+
+  // ==========================================================
+  // PRESENCE
+  // ==========================================================
 
   radarPresent =
     true;
 
 
+  // ==========================================================
+  // DETECTION COUNT
+  // ==========================================================
+
   detectionCount++;
 
+
+  // ==========================================================
+  // START TIME
+  // ==========================================================
 
   detectionStartTime =
     millis();
@@ -785,6 +927,10 @@ void startNewDetection(
     0;
 
 
+  // ==========================================================
+  // DISTANCE STATISTICS
+  // ==========================================================
+
   minimumDistance =
     distance;
 
@@ -792,6 +938,10 @@ void startNewDetection(
   maximumDistance =
     distance;
 
+
+  // ==========================================================
+  // VELOCITY STATISTICS
+  // ==========================================================
 
   peakApproachSpeed =
     0.0;
@@ -809,9 +959,9 @@ void startNewDetection(
     1;
 
 
-  // ----------------------------------------------------------
-  // Reset median filter
-  // ----------------------------------------------------------
+  // ==========================================================
+  // RESET MEDIAN FILTER
+  // ==========================================================
 
   medianIndex =
     0;
@@ -825,12 +975,17 @@ void startNewDetection(
     int i = 0;
     i < MEDIAN_SIZE;
     i++
-  ) {
+  )
+  {
 
     medianBuffer[i] =
       distance;
   }
 
+
+  // ==========================================================
+  // INITIALIZE FILTER VALUES
+  // ==========================================================
 
   medianDistance =
     distance;
@@ -844,6 +999,10 @@ void startNewDetection(
     distance;
 
 
+  // ==========================================================
+  // INITIALIZE VELOCITY
+  // ==========================================================
+
   rawVelocity =
     0.0;
 
@@ -851,6 +1010,10 @@ void startNewDetection(
   filteredVelocity =
     0.0;
 
+
+  // ==========================================================
+  // INITIALIZE TIME
+  // ==========================================================
 
   previousTime =
     millis();
@@ -860,12 +1023,9 @@ void startNewDetection(
     0;
 
 
-  Serial.println();
-
-  Serial.println(
-    "# ===== NEW RADAR DETECTION ====="
-  );
-
+  // ==========================================================
+  // PRINT FIRST MEASUREMENT
+  // ==========================================================
 
   printMeasurement();
 }
@@ -877,7 +1037,8 @@ void startNewDetection(
 
 void addToMedianBuffer(
   float value
-) {
+)
+{
 
   medianBuffer[
     medianIndex
@@ -891,7 +1052,8 @@ void addToMedianBuffer(
   if (
     medianIndex >=
     MEDIAN_SIZE
-  ) {
+  )
+  {
 
     medianIndex =
       0;
@@ -901,7 +1063,8 @@ void addToMedianBuffer(
   if (
     medianCount <
     MEDIAN_SIZE
-  ) {
+  )
+  {
 
     medianCount++;
   }
@@ -912,52 +1075,61 @@ void addToMedianBuffer(
 // CALCULATE MEDIAN
 // ============================================================
 
-float calculateMedian() {
+float calculateMedian()
+{
 
   float temp[
     MEDIAN_SIZE
   ];
 
 
+  // ==========================================================
+  // COPY BUFFER
+  // ==========================================================
+
   for (
     int i = 0;
     i < MEDIAN_SIZE;
     i++
-  ) {
+  )
+  {
 
     temp[i] =
       medianBuffer[i];
   }
 
 
-  // ----------------------------------------------------------
-  // Sort
-  // ----------------------------------------------------------
+  // ==========================================================
+  // SORT
+  // ==========================================================
 
   for (
     int i = 0;
-    i <
-    MEDIAN_SIZE - 1;
+    i < MEDIAN_SIZE - 1;
     i++
-  ) {
+  )
+  {
 
     for (
       int j = i + 1;
-      j <
-      MEDIAN_SIZE;
+      j < MEDIAN_SIZE;
       j++
-    ) {
+    )
+    {
 
       if (
         temp[j] <
         temp[i]
-      ) {
+      )
+      {
 
         float swap =
           temp[i];
 
+
         temp[i] =
           temp[j];
+
 
         temp[j] =
           swap;
@@ -966,9 +1138,9 @@ float calculateMedian() {
   }
 
 
-  // ----------------------------------------------------------
-  // Return middle value
-  // ----------------------------------------------------------
+  // ==========================================================
+  // RETURN MIDDLE VALUE
+  // ==========================================================
 
   return temp[
     MEDIAN_SIZE / 2
@@ -980,25 +1152,40 @@ float calculateMedian() {
 // DIRECTION
 // ============================================================
 
-String getDirection() {
+String getDirection()
+{
+
+  // ----------------------------------------------------------
+  // APPROACHING
+  // ----------------------------------------------------------
 
   if (
     filteredVelocity <
     -RADIAL_MOTION_THRESHOLD
-  ) {
+  )
+  {
 
     return "APPROACHING";
   }
 
 
+  // ----------------------------------------------------------
+  // RECEDING
+  // ----------------------------------------------------------
+
   if (
     filteredVelocity >
     RADIAL_MOTION_THRESHOLD
-  ) {
+  )
+  {
 
     return "RECEDING";
   }
 
+
+  // ----------------------------------------------------------
+  // LOW RADIAL MOTION
+  // ----------------------------------------------------------
 
   return "LOW_RADIAL_MOTION";
 }
@@ -1008,7 +1195,12 @@ String getDirection() {
 // PRINT MEASUREMENT
 // ============================================================
 
-void printMeasurement() {
+void printMeasurement()
+{
+
+  // ==========================================================
+  // TIME
+  // ==========================================================
 
   Serial.print(
     millis()
@@ -1017,7 +1209,9 @@ void printMeasurement() {
   Serial.print(",");
 
 
-  // Raw distance
+  // ==========================================================
+  // RAW DISTANCE
+  // ==========================================================
 
   Serial.print(
     rawDistance,
@@ -1027,7 +1221,9 @@ void printMeasurement() {
   Serial.print(",");
 
 
-  // Median distance
+  // ==========================================================
+  // MEDIAN DISTANCE
+  // ==========================================================
 
   Serial.print(
     medianDistance,
@@ -1037,7 +1233,9 @@ void printMeasurement() {
   Serial.print(",");
 
 
-  // Filtered distance
+  // ==========================================================
+  // FILTERED DISTANCE
+  // ==========================================================
 
   Serial.print(
     filteredDistance,
@@ -1047,7 +1245,9 @@ void printMeasurement() {
   Serial.print(",");
 
 
-  // Sample interval
+  // ==========================================================
+  // SAMPLE INTERVAL
+  // ==========================================================
 
   Serial.print(
     sampleInterval
@@ -1056,7 +1256,9 @@ void printMeasurement() {
   Serial.print(",");
 
 
-  // Raw velocity
+  // ==========================================================
+  // RAW VELOCITY
+  // ==========================================================
 
   Serial.print(
     rawVelocity,
@@ -1066,7 +1268,9 @@ void printMeasurement() {
   Serial.print(",");
 
 
-  // Filtered velocity
+  // ==========================================================
+  // FILTERED VELOCITY
+  // ==========================================================
 
   Serial.print(
     filteredVelocity,
@@ -1076,7 +1280,9 @@ void printMeasurement() {
   Serial.print(",");
 
 
-  // Direction
+  // ==========================================================
+  // DIRECTION
+  // ==========================================================
 
   Serial.print(
     getDirection()
@@ -1085,12 +1291,14 @@ void printMeasurement() {
   Serial.print(",");
 
 
-  // Presence
+  // ==========================================================
+  // PRESENCE
+  // ==========================================================
 
   Serial.println(
-    radarPresent ?
-    1 :
-    0
+    radarPresent
+      ? 1
+      : 0
   );
 }
 
@@ -1099,7 +1307,8 @@ void printMeasurement() {
 // DETECTION SUMMARY
 // ============================================================
 
-void printDetectionSummary() {
+void printDetectionSummary()
+{
 
   Serial.println();
 
@@ -1108,13 +1317,17 @@ void printDetectionSummary() {
   );
 
   Serial.println(
-    "                 RADAR SUMMARY"
+    "                    RADAR SUMMARY"
   );
 
   Serial.println(
     "============================================================"
   );
 
+
+  // ==========================================================
+  // DETECTION NUMBER
+  // ==========================================================
 
   Serial.print(
     "Detection number       : "
@@ -1124,6 +1337,10 @@ void printDetectionSummary() {
     detectionCount
   );
 
+
+  // ==========================================================
+  // DURATION
+  // ==========================================================
 
   Serial.print(
     "Detection duration     : "
@@ -1137,6 +1354,10 @@ void printDetectionSummary() {
     " ms"
   );
 
+
+  // ==========================================================
+  // MINIMUM DISTANCE
+  // ==========================================================
 
   Serial.print(
     "Minimum distance       : "
@@ -1152,6 +1373,10 @@ void printDetectionSummary() {
   );
 
 
+  // ==========================================================
+  // MAXIMUM DISTANCE
+  // ==========================================================
+
   Serial.print(
     "Maximum distance       : "
   );
@@ -1165,6 +1390,10 @@ void printDetectionSummary() {
     " cm"
   );
 
+
+  // ==========================================================
+  // PEAK APPROACH SPEED
+  // ==========================================================
 
   Serial.print(
     "Peak approach speed    : "
@@ -1180,6 +1409,10 @@ void printDetectionSummary() {
   );
 
 
+  // ==========================================================
+  // PEAK RECEDING SPEED
+  // ==========================================================
+
   Serial.print(
     "Peak receding speed    : "
   );
@@ -1194,6 +1427,10 @@ void printDetectionSummary() {
   );
 
 
+  // ==========================================================
+  // VALID SAMPLES
+  // ==========================================================
+
   Serial.print(
     "Valid samples          : "
   );
@@ -1203,9 +1440,14 @@ void printDetectionSummary() {
   );
 
 
+  // ==========================================================
+  // AVERAGE VELOCITY
+  // ==========================================================
+
   if (
     validSamples > 0
-  ) {
+  )
+  {
 
     float averageVelocity =
       totalAbsoluteVelocity /
